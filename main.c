@@ -469,6 +469,79 @@ static u8 mount_unk = EMU_OFF;
 #include "include/www/www_client.h"
 #include "include/www/www_start.h"
 
+sys_ppu_thread_t thread_id_telegraf = SYS_PPU_THREAD_ID_INVALID;
+static void telegraf_thread(u64 arg)
+{
+	static int conn_socket = -1;
+	static char msg[256];
+	u8 d_retries = 0;
+	
+	sys_ppu_thread_sleep(45); // Init time, wait for network
+	
+	telegraf_conn_retry:
+	conn_socket = connectudp_to_server("192.168.1.1", 8094);
+	if(conn_socket <  0) {d_retries++; sys_ppu_thread_sleep(2); if(d_retries < 10) goto telegraf_conn_retry;}
+	if(conn_socket >= 0) ssend(conn_socket, "Telegraf connected...\r\n");
+	play_rco_sound("snd_trophy");
+	vshtask_notify("Telegraf connected...");
+	
+	//(void*&)(xsetting_D0261D72) = (void*)((int)getNIDfunc("xsetting",0xD0261D72));
+	//char sys_name[CELL_SYSUTIL_SYSTEMPARAM_NICKNAME_SIZE + 1];
+	//memset(sys_name, 0, sizeof(sys_name));
+	//cellSysutilGetSystemParamString(CELL_SYSUTIL_SYSTEMPARAM_ID_NICKNAME, sys_name, sizeof(sys_name));
+	//xsetting_D0261D72()->loadRegistryIntValue(0x11,&d_retries);
+	
+	//&xsetting_0AF1F161 = (void*)((int)getNIDfunc("xsetting", 0xAF1F161, 0));
+	char sys_name[0x80];
+	memset(sys_name,0,0x80);
+	int nick_len=0;		
+	xsetting_0AF1F161()->GetSystemNickname(sys_name,&nick_len);
+	
+	int errors = 0;
+	int last_error = 0;
+	
+	while(working){ // TODO: Find a better poison pill
+		//s32 arg_1, total_time_in_sec, power_on_ctr, power_off_ctr;
+		//u32 dd, hh, mm, ss;
+		
+		//sys_sm_request_be_count(&arg_1, &total_time_in_sec, &power_on_ctr, &power_off_ctr); // Cell time
+		
+		//CellRtcTick pTick;
+		//cellRtcGetCurrentTick(&pTick); // RTC time
+		
+		//ss = (u32)((pTick.tick - (bb ? gTick.tick : rTick.tick)) / 1000000); if(ss > 864000) ss = 0;
+		//ss += (u32)total_time_in_sec;
+		
+		memset(msg, 0, 256);
+		
+		u8 t1 = 0, t2 = 0;
+		get_temperature(0, &t1); // CPU // 3E030000 -> 3E.03°C -> 62.(03/256)°C
+		get_temperature(1, &t2); // RSX
+
+		u8 st, mode, unknown;
+		sys_sm_get_fan_policy(0, &st, &mode, &fan_speed, &unknown);
+		
+		get_game_info();
+		
+		sprintf(msg, "ps3mon,hostname=%s,game=%s cpu=%ii,rsx=%ii,fan=%ii", sys_name, (_game_TitleID[0] != 0) ? _game_TitleID : "XMB", t1, t2, fan_speed * 100 / 255);
+		int reply = ssend(conn_socket, msg);
+		if(reply < 0){
+			errors++;
+			last_error = sys_net_errno;
+		}
+		
+		sys_ppu_thread_sleep(10); // TODO: Replace with more precise timers
+	}
+	
+	ssend(conn_socket, "Telegraf exiting!\r\n");
+	play_rco_sound("snd_trophy");
+	vshtask_notify("Telegraf unloaded!");
+	
+	sclose(&conn_socket);
+
+	sys_ppu_thread_exit(0);
+}
+
 static void wwwd_thread(u64 arg)
 {
 	////////////////////////////////////////
@@ -562,12 +635,16 @@ static void wwwd_thread(u64 arg)
 #ifdef USE_DEBUG
 	u8 d_retries = 0;
 again_debug:
-	debug_s = connect_to_server("192.168.100.209", 38009);
+	debug_s = connectudp_to_server("192.168.10.200", 38009);
 	if(debug_s <  0) {d_retries++; sys_ppu_thread_sleep(2); if(d_retries < 10) goto again_debug;}
 	if(debug_s >= 0) ssend(debug_s, "Connected...\r\n");
 	sprintf(debug, "FC=%i T0=%i T1=%i\r\n", webman_config->fanc, webman_config->man_speed, webman_config->dyn_temp);
 	ssend(debug_s, debug);
 #endif
+
+	
+	// Start Telegraf thread
+	sys_ppu_thread_create(&thread_id_telegraf, telegraf_thread, 0, THREAD_PRIO, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "TelegrafMonitoring");
 
 	// sys_ppu_thread_sleep(2);
 
@@ -695,6 +772,9 @@ static void wwwd_stop_thread(u64 arg)
 	#endif
 
 	restore_settings();
+	
+	// Wait for Telegraf thread to exit
+	thread_join(thread_id_telegraf);
 
 	thread_join(thread_id_wwwd);
 

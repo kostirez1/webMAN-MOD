@@ -59,9 +59,68 @@ static int connect_to_server_ex(const char *server_ip, u16 port, u8 rcv_timeout)
 	return s;
 }
 
+static int connectudp_to_server_ex(const char *server_ip, u16 port, u8 rcv_timeout) // TODO: Refactor ugly hack
+{
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	if(s < 0)
+	{
+		return FAILED;
+	}
+
+	struct sockaddr_in sin;
+	socklen_t sin_len = sizeof(sin);
+	_memset(&sin, sin_len);
+
+	sin.sin_family = AF_INET;
+	sin.sin_port = htons(port);
+
+	unsigned int ip_address;
+
+	if((ip_address = inet_addr(server_ip)) != (unsigned int)-1)
+	{
+		sin.sin_addr.s_addr = ip_address;
+	}
+	else
+	{
+		struct hostent *hp;
+
+		if((hp = gethostbyname(server_ip)) == NULL)
+		{
+			return FAILED;
+		}
+
+		sin.sin_family = hp->h_addrtype;
+		memcpy(&sin.sin_addr, hp->h_addr, hp->h_length);
+	}
+
+	struct timeval tv;
+	tv.tv_usec = 0;
+	tv.tv_sec = rcv_timeout ? rcv_timeout : 30;
+	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	if(rcv_timeout)
+		setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	if(connect(s, (struct sockaddr *)&sin, sin_len) < 0)
+	{
+		return FAILED;
+	}
+
+	tv.tv_sec = 60;
+	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	//setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	return s;
+}
+
 static int connect_to_server(const char *server_ip, u16 port)
 {
 	return connect_to_server_ex(server_ip, port, false);
+}
+
+static int connectudp_to_server(const char *server_ip, u16 port) // TODO: Refactor ugly hack
+{
+	return connectudp_to_server_ex(server_ip, port, false);
 }
 
 static int slisten(int port, int backlog)
