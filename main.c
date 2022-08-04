@@ -470,6 +470,14 @@ static u8 mount_unk = EMU_OFF;
 #include "include/www/www_start.h"
 
 sys_ppu_thread_t thread_id_telegraf = SYS_PPU_THREAD_ID_INVALID;
+
+/*
+ *	TODO:
+ *		Read settings from file
+ *		Add crash check - create file on startup, delete on clear shutdown, prevent start if file still exists
+ *		Move to separate include file
+ *		
+ */
 static void telegraf_thread(u64 arg)
 {
 	static int conn_socket = -1;
