@@ -1,10 +1,13 @@
 // https://github.com/rxi/ini ported to Cell
 #include "tinyini/ini.c"
 
+static void poll_start_play_time(void);
+
 #define TELEGRAF_CRASH_DETECT "/dev_hdd0/tmp/telegraf_running"
 #define TELEGRAF_CONFIG "/dev_hdd0/tmp/telegraf.ini"
 #define TELEGRAF_INIT_SLEEP 10
 #define TELEGRAF_NETWORK_SLEEP 45
+#define TELEGRAF_CRASH_DETECT_SLEEP 90
 
 #define TELEGRAF_TELEMETRY_EVENT 0x12345678ULL
 
@@ -16,8 +19,9 @@ static void telegraf_thread(u64 arg)
 	
 	if(file_exists(TELEGRAF_CRASH_DETECT)){
 		play_rco_sound("snd_trophy");
-		vshtask_notify("Telegraf cannot be loaded. Crash file exists!");
-		sys_ppu_thread_exit(1);
+		vshtask_notify("Telegraf crash file exists, waiting additional 90!");
+		sys_ppu_thread_sleep(TELEGRAF_CRASH_DETECT_SLEEP);
+		cellFsUnlink(TELEGRAF_CRASH_DETECT);
 	}
 	
 	save_file(TELEGRAF_CRASH_DETECT, "", 0);
@@ -94,21 +98,19 @@ static void telegraf_thread(u64 arg)
 		if(sys_event_queue_receive(precise_queue, &event, 15000000) == CELL_OK){ // 15 seconds timeout
 			// Event received
 			
-			// TODO: Monitor Cell total time
-			//       Monitor internal HDD free space
-			//       Monitor free RAM
-		
-			//s32 arg_1, total_time_in_sec, power_on_ctr, power_off_ctr;
-			//u32 dd, hh, mm, ss;
+			s32 arg_1, total_time_in_sec, power_on_ctr, power_off_ctr;
 			
-			//sys_sm_request_be_count(&arg_1, &total_time_in_sec, &power_on_ctr, &power_off_ctr); // Cell time
+			CellRtcTick pTick; u32 ss;
+
+			cellRtcGetCurrentTick(&pTick);
+
+			poll_start_play_time();
+
+			ss = (u32)((pTick.tick - rTick.tick) / 1000000); if(ss > 864000) ss = 0;
 			
-			//CellRtcTick pTick;
-			//cellRtcGetCurrentTick(&pTick); // RTC time
-			
-			//ss = (u32)((pTick.tick - (bb ? gTick.tick : rTick.tick)) / 1000000); if(ss > 864000) ss = 0;
-			//ss += (u32)total_time_in_sec;
-			
+			system_call_4(0x187, (u32)&arg_1, (u32)&total_time_in_sec, (u32)&power_on_ctr, (u32)&power_off_ctr);
+			ss += (u32)total_time_in_sec;
+
 			memset(msg, 0, 256);
 			
 			u8 t1 = 0, t2 = 0;
@@ -118,9 +120,13 @@ static void telegraf_thread(u64 arg)
 			u8 st, mode, unknown;
 			sys_sm_get_fan_policy(0, &st, &mode, &fan_speed, &unknown);
 			
+			u64 hdd_free = get_free_space("/dev_hdd0");
+
+			get_meminfo();
+
 			get_game_info();
 			
-			sprintf(msg, "ps3mon,hostname=%s,game=%s cpu=%ii,rsx=%ii,fan=%ii", system_name, (_game_TitleID[0] != 0) ? _game_TitleID : "XMB", t1, t2, fan_speed * 100 / 255);
+			sprintf(msg, "ps3mon,hostname=%s,game=%s cpu=%ii,rsx=%ii,fan=%ii,memfree=%ii,hddfree=%llui,celltime=%ii", system_name, (_game_TitleID[0] != 0) ? _game_TitleID : "XMB", t1, t2, fan_speed * 100 / 255, (int) meminfo.avail, hdd_free, ss);
 			int reply = ssend(conn_socket, msg);
 			if(reply < 0){
 				errors++;
