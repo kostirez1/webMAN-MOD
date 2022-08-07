@@ -24,6 +24,22 @@
 #define FTP_ERROR_550		"550 File unavailable\r\n"			// Requested action not taken. File unavailable (e.g., file not found, no access).
 #define FTP_ERROR_RNFR_550	"550 RNFR Error\r\n"				// Requested action not taken. File unavailable.
 
+#include <sys/tty.h>
+
+static void logmeftp(int thread_id, char *msg){
+	unsigned int facak = 0;
+	char buffer[64];
+	snprintf(buffer, 64, "FTP[%i] %s\n", thread_id, msg);
+
+	sys_tty_write(SYS_TTYP_USER5, buffer, strlen(buffer), &facak);
+}
+
+static void logmeftp2(int thread_id, char *msg, int i){
+	char buffik[64];
+	snprintf(buffik, 64, "%s - %i", msg, i);
+	logmeftp(thread_id, buffik);
+}
+
 static u8 ftp_active = 0;
 static u8 ftp_working = 0;
 static u8 ftp_session = 1;
@@ -149,6 +165,8 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 {
 	int conn_s_ftp = (int)conn_s_ftp_p; // main communications socket
 
+	//logmeftp2(conn_s_ftp, "+++ New thread created socket", conn_s_ftp);
+
 	sys_net_sockinfo_t conn_info;
 	sys_net_get_sockinfo(conn_s_ftp, &conn_info, 1);
 
@@ -221,6 +239,10 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 	{
 		_memset(buffer, FTP_RECV_SIZE);
 		rlen = (int)recv(conn_s_ftp, buffer, FTP_RECV_SIZE, 0);
+
+		// BUG 3: Connections are sometimes forcibly closed with FIN-ACK
+		//logmeftp2(conn_s_ftp, "Received data", rlen);
+
 		if(rlen > 0)
 		{
 			buffer[rlen] = '\0';
@@ -689,23 +711,71 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 					for(int p1x, p2x; pasv_retry < 250; pasv_retry++, pasv_port++)
 					{
 						if(data_s >= 0) sclose(&data_s);
-						if(pasv_s >= 0) sclose(&pasv_s);
+						if(pasv_s >= 0){
+							//logmeftp2(conn_s_ftp, "Closing previous passive mode socket", pasv_s);
+							sclose(&pasv_s);
+						}
 
 						p1x = ( (pasv_port & 0xff00) >> 8) | 0x80; // use ports 32768 -> 65528 (0x8000 -> 0xFFF8)
 						p2x = ( (pasv_port & 0x00ff)     );
 
 						pasv_s = slisten(getPort(p1x, p2x), 1);
 
+						// BUG 1: slisten() might die on bind() errno SYS_NET_EADDRINUSE and still return a valid socket handle
+						//        this results in timeout when client tries to connect to this closed port
+						/*
+                                  13:03:03 PM FTP[907] Closing previous passive mode socket - 739
+                                  13:03:03 PM SOCKET - listen bind addr in use!!! Port - 40576
+                                  13:03:03 PM SOCKET - listen Bind failed!!!
+                                  13:03:03 PM FTP[907] Creating passive mode channel port  - 40576
+                                  13:03:03 PM FTP[907] New channel socket - 741
+								  // This is when the client times out and makes a new connection, while FTP socket (and thread) 907 never exits
+								  13:03:23 PM FTP[0] Accepting new connection socket - 853
+				        */
 						if(pasv_s >= 0)
 						{
+							//logmeftp2(conn_s_ftp, "Creating passive mode channel port ", getPort(p1x, p2x));
+							//logmeftp2(conn_s_ftp, "New channel socket", pasv_s);
 							sprintf(pasv_output, "227 Entering Passive Mode (%s,%i,%i)\r\n", ip_address, p1x, p2x);
 							ssend(conn_s_ftp, pasv_output);
 
-							if((data_s = accept(pasv_s, NULL, NULL)) > 0)
+							// BUG 2: accept returns >= 0 in case a of success, only negative numbers are failure
+							//        this happens when socket number overflows from 1023 to 0 and accept() then returns 0 as the new socket handle
+							if((data_s = accept(pasv_s, NULL, NULL)) >= 0)
 							{
+								//logmeftp2(conn_s_ftp, "Client connection accepted on socket ", pasv_s);
 								setsockopt(pasv_s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-								dataactive = 1; break;
+								dataactive =  1; break;
+							} else {
+								/*logmeftp2(conn_s_ftp, "Client connection failed on socket!!!!!", pasv_s);
+								switch(sys_net_errno){
+									case SYS_NET_EINTR: 
+										logmeftp2(conn_s_ftp, "Blocking cancelled by sys_net_abort_socket()", pasv_s);
+										break;
+									case SYS_NET_EBADF: 
+										logmeftp2(conn_s_ftp, "Invalid socket number specified", pasv_s);
+										break;
+									case SYS_NET_EWOULDBLOCK: 
+										logmeftp2(conn_s_ftp, "Established connection does not exist (assuming nonblocking)", pasv_s);
+										break;
+									case SYS_NET_EFAULT: 
+										logmeftp2(conn_s_ftp, "Invalid argument", pasv_s);
+										break;
+									case SYS_NET_EINVAL: 
+										logmeftp2(conn_s_ftp, "Invalid function call", pasv_s);
+										break;
+									case SYS_NET_EOPNOTSUPP: 
+										logmeftp2(conn_s_ftp, "Invalid call for that socket", pasv_s);
+										break;
+									case SYS_NET_ECONNABORTED: 
+										logmeftp2(conn_s_ftp, "Connection was aborted", pasv_s);
+										break;
+									default:
+										logmeftp2(conn_s_ftp, "Dont really know what happend", pasv_s);
+										logmeftp2(conn_s_ftp, "But the errno is ", sys_net_errno);
+										break;
+								}*/
 							}
 						}
 					}
@@ -1361,6 +1431,29 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 		}
 		else
 		{
+			/*play_rco_sound("snd_trophy");
+			vshtask_notify("Connection closed!");
+			switch(sys_net_errno){
+				case SYS_NET_EINTR: 
+					vshtask_notify("Blocking cancelled by sys_net_abort_socket()");
+					break;
+				case SYS_NET_EBADF: 
+					vshtask_notify("Invalid socket number specified");
+					break;
+				case SYS_NET_EWOULDBLOCK: 
+					vshtask_notify("Timeout occured (when the SO_RCVTIMO option is specified).");
+					break;
+				case SYS_NET_EINVAL: 
+					vshtask_notify("Invalid argument or function call");
+					break;
+				case SYS_NET_ECONNABORTED: 
+					vshtask_notify("Connection was closed");
+					break;
+				default:
+					vshtask_notify("Dont really know what happend");
+					vshtask_notify(sys_net_errno);
+					break;
+			}*/
 			connactive = 0;
 			break;
 		}
@@ -1368,9 +1461,15 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 		//sys_ppu_thread_usleep(2000);
 	}
 
+	//logmeftp2(conn_s_ftp, "--- Closing thread socket", conn_s_ftp);
+
 	if(sysmem) sys_memory_free(sysmem);
 
-	if(pasv_s >= 0) sclose(&pasv_s);
+	
+	if(pasv_s >= 0){
+		//logmeftp2(conn_s_ftp, "Closing passive channel socket", pasv_s);
+		sclose(&pasv_s);
+	}
 	sclose(&conn_s_ftp);
 	sclose(&data_s);
 
@@ -1414,19 +1513,28 @@ relisten:
 			sys_ppu_thread_usleep(ftp_active ? 5000 : 50000);
 			if(!working || !ftp_working) break;
 
-			if(ftp_active > MAX_FTP_THREADS) continue;
+			if(ftp_active > MAX_FTP_THREADS){
+				//logmeftp(0, "threads are full!!!");
+				sys_ppu_thread_sleep(5);
+				continue;
+			} else {
+				//logmeftp2(0, "number of threads", ftp_active);
+			}
 
 			int conn_s_ftp;
 			if(sys_admin && ((conn_s_ftp = accept(list_s, NULL, NULL)) >= 0))
 			{
 				if(!working) {sclose(&conn_s_ftp); break;}
 
+				//logmeftp2(0, "Accepting new connection socket", conn_s_ftp);
+
 				sys_ppu_thread_t t_id;
 				sys_ppu_thread_create(&t_id, handleclient_ftp, (u64)conn_s_ftp, THREAD_PRIO_FTP, THREAD_STACK_SIZE_FTP_CLIENT, SYS_PPU_THREAD_CREATE_NORMAL, THREAD_NAME_FTPD);
 			}
-			else if((sys_net_errno == SYS_NET_EBADF) || (sys_net_errno == SYS_NET_ENETDOWN))
+			else if((sys_net_errno == SYS_NET_EBADF) || (sys_net_errno == SYS_NET_ENETDOWN) || (sys_net_errno == SYS_NET_ECONNABORTED) || (sys_net_errno == SYS_NET_EOPNOTSUPP) || (sys_net_errno == SYS_NET_EFAULT))
 			{
 				sclose(&list_s);
+				//logmeftp(0, "accept failed bad socket number!!!");
 				goto relisten;
 			}
 		}

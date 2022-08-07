@@ -1,8 +1,26 @@
+#include <sys/tty.h>
+
+static void play_rco_sound(const char *sound);
+
 #define getPort(p1x, p2x) ((p1x * 256) + p2x)
 
 static int ssend(int socket, const char *str)
 {
 	return send(socket, str, strlen(str), 0);
+}
+
+static void logmesocket(char *msg){
+	unsigned int facak = 0;
+	char buffer[64];
+	snprintf(buffer, 64, "SOCKET - %s\n", msg);
+
+	sys_tty_write(SYS_TTYP_USER5, buffer, strlen(buffer), &facak);
+}
+
+static void logmesocket2(char *msg, int i){
+	char buffik[64];
+	snprintf(buffik, 64, "%s - %i", msg, i);
+	logmesocket(buffik);
 }
 
 static int connect_to_server_ex(const char *server_ip, u16 port, u8 rcv_timeout)
@@ -128,6 +146,10 @@ static int slisten(int port, int backlog)
 	int s = socket(AF_INET, SOCK_STREAM, 0);
 	if(s < 0)
 	{
+		if(sys_net_errno == SYS_NET_EMFILE){
+			//logmesocket("No free space in socket table!!!");
+		}
+		//logmesocket2("Listen socket create failed!!! Port", port);
 		return FAILED;
 	}
 
@@ -144,8 +166,24 @@ static int slisten(int port, int backlog)
 	sa.sin_port = htons(port);
 	sa.sin_addr.s_addr = htonl(INADDR_ANY);
 
-	bind(s, (struct sockaddr *)&sa, sin_len);
-	listen(s, backlog);
+	if(bind(s, (struct sockaddr *)&sa, sin_len) < 0){
+		if(sys_net_errno == SYS_NET_EADDRINUSE){
+			//logmesocket2("listen bind addr in use!!! Port", port);
+		}
+		//logmesocket("listen Bind failed!!!");
+		shutdown(s, SHUT_RDWR); // PATCH for BUG 1
+		socketclose(s); 
+		return FAILED;
+	}
+	if(listen(s, backlog) < 0){
+		if(sys_net_errno == SYS_NET_EBADF){
+			//logmesocket(" listen bad socket number!!!");
+		}
+		//logmesocket("listen failed!!!");
+		shutdown(s, SHUT_RDWR); // PATCH for BUG 1
+		socketclose(s); 
+		return FAILED;
+	}
 
 	return s;
 }

@@ -119,6 +119,8 @@ SYS_MODULE_EXIT(wwwd_stop);
 #include "include/init/string.h"
 #include "include/init/wm_config.h"
 
+#include "include/syslog.h"
+
 ///////////// PS3MAPI BEGIN //////////////
 #ifdef COBRA_ONLY
  #define SYSCALL8_OPCODE_PS3MAPI					0x7777
@@ -472,6 +474,9 @@ static u8 mount_unk = EMU_OFF;
 
 static void wwwd_thread(u64 arg)
 {
+
+	gSyslog_socket = connectudp_to_server("192.168.69.1", 514);
+
 	////////////////////////////////////////
 
 	led(YELLOW, BLINK_FAST);
