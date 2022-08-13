@@ -25,18 +25,44 @@
 #define FTP_ERROR_RNFR_550	"550 RNFR Error\r\n"				// Requested action not taken. File unavailable.
 
 #include <sys/tty.h>
+#include <sys/sys_time.h>
+#include <sys/synchronization.h>
+
+#define BUFFER_TCP 512
+#define MIN_KERNEL_IP_FREE 256*1024 // 256KiB
+#define MIN_KERNEL_MAX_RETRIES 10 // Try 10 times
+#define MIN_KERNEL_RETRY_PAUSE 2 // 2 seconds
+
+typedef struct ftp_writer_data {
+	sys_semaphore_t sem_read;
+	sys_semaphore_t sem_write;
+	int fd;
+	char *bufferA;
+	char *bufferB;
+	int bufferA_len;
+	int bufferB_len;
+	bool error_flag;
+	bool exit_flag;
+} ftp_writer_data;
 
 static void logmeftp(int thread_id, char *msg){
 	unsigned int facak = 0;
-	char buffer[64];
-	snprintf(buffer, 64, "FTP[%i] %s\n", thread_id, msg);
+	char buffer[128];
+	snprintf(buffer, 128, "ID %i: %s", thread_id, msg);
 
-	sys_tty_write(SYS_TTYP_USER5, buffer, strlen(buffer), &facak);
+	//sys_tty_write(SYS_TTYP_USER5, buffer, strlen(buffer), &facak);
+	syslog_send(21, 6, "FTP", buffer);
 }
 
 static void logmeftp2(int thread_id, char *msg, int i){
 	char buffik[64];
 	snprintf(buffik, 64, "%s - %i", msg, i);
+	logmeftp(thread_id, buffik);
+}
+
+static void logmeftp3(int thread_id, char *msg, char *add){
+	char buffik[128];
+	snprintf(buffik, 128, "%s - %s}", msg, add);
 	logmeftp(thread_id, buffik);
 }
 
@@ -54,17 +80,19 @@ static u8 parsePath(char *absPath_s, const char *path, const char *cwd, bool sca
 {
 	if(!absPath_s || !path || !cwd) return 0;
 
-	if(*path == '/')
+	if(*path == '/') // Yes
 	{
-		sprintf(absPath_s, "%s", path);
+		// Is the new patch absolute? Yes
+		sprintf(absPath_s, "%s", path); // /dev_hdd0/packages/adsa/faa
 
-		normalize_path(absPath_s, true);
+		normalize_path(absPath_s, true); // /dev_hdd0/packages/adsa/faa/
 
 		if(islike(path, "/dev_blind")) {mount_device("/dev_blind", NULL, NULL); filepath_check(absPath_s); return 1;}
 		if(islike(path, "/dev_hdd1") )  mount_device("/dev_hdd1",  NULL, NULL);
 	}
 	else
 	{
+		// New path is relative
 		u16 len = sprintf(absPath_s, "%s", cwd);
 
 		normalize_path(absPath_s, true);
@@ -83,7 +111,27 @@ static u8 parsePath(char *absPath_s, const char *path, const char *cwd, bool sca
 			if(file_exists(absPath_s)) return 0;
 
 			normalize_path((char*)cwd, false);
-			sprintf(absPath_s, "%s/%s", cwd, path);
+
+			/*
+				If the requested path doesnt exist, it bugs out
+
+				CWD = /
+				PATH = /dev_hdd0/packages/adsa/faa
+				=> ///dev_hdd0/packages/adsa/faa
+			*/
+			if(absPath_s[0] != '/'){
+				// Path was relative, need to concat it after cwd
+				if(cwd[strlen(cwd) - 1] != '/'){
+					// CWD doesnt end with slash
+					sprintf(absPath_s, "%s/%s", cwd, path);
+				} else {
+					// CWD ends with slash
+					sprintf(absPath_s, "%s%s", cwd, path);
+				}
+			} else {
+				// Path was absolute
+				sprintf(absPath_s, "%s", path);
+			}
 		}
 
 	filepath_check(absPath_s);
@@ -161,11 +209,57 @@ static sys_addr_t allocate_ftp_buffer(sys_addr_t sysmem)
 
 #define is_remote_ip (conn_info.local_adr.s_addr != conn_info.remote_adr.s_addr)
 
+static void writer_thread_ftp(ftp_writer_data *comm_data)
+{
+	logmeftp(999, "... Writer thread created");
+
+	bool curr_buffer = true; // true == A, false == B
+
+	int64_t totalwr_usec = 0;
+	int writes_made = 0;
+
+	while(!comm_data->exit_flag){
+		
+		sys_semaphore_wait(comm_data->sem_write, 0);
+		
+		int tmp_len = curr_buffer ? comm_data->bufferA_len : comm_data->bufferB_len;
+
+		if(tmp_len > 0){
+			int64_t start = sys_time_get_system_time();
+			int status = cellFsWrite(comm_data->fd, curr_buffer ? comm_data->bufferA : comm_data->bufferB, tmp_len, NULL);
+			int64_t end = sys_time_get_system_time();
+			if(status != CELL_FS_SUCCEEDED){
+				comm_data->error_flag = true;
+				logmeftp(999, "... Writer thread failed on fsWrite() write");
+				sys_semaphore_post(comm_data->sem_read, 1);
+				break;
+			}
+			
+			totalwr_usec += end - start;
+			writes_made++;
+
+			curr_buffer = !curr_buffer;
+		}
+		else if(tmp_len == 0)
+		{
+			logmeftp(999, "... Writer thread at the end of the file");
+			break;
+		}
+
+		sys_semaphore_post(comm_data->sem_read, 1);
+	}
+
+	logmeftp2(999, "Write waits made", writes_made);
+	logmeftp2(999, "Average write wait in usec was", totalwr_usec / writes_made);
+	logmeftp(999, "... Writer thread ending");
+	sys_ppu_thread_exit(0);
+}
+
 static void handleclient_ftp(u64 conn_s_ftp_p)
 {
 	int conn_s_ftp = (int)conn_s_ftp_p; // main communications socket
 
-	//logmeftp2(conn_s_ftp, "+++ New thread created socket", conn_s_ftp);
+	logmeftp2(conn_s_ftp, "+++ New thread created socket", conn_s_ftp);
 
 	sys_net_sockinfo_t conn_info;
 	sys_net_get_sockinfo(conn_s_ftp, &conn_info, 1);
@@ -265,7 +359,9 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 			{
 				if(_IS(cmd, "RETR"))
 				{
-					if(data_s < 0 && pasv_s >= 0) data_s = accept(pasv_s, NULL, NULL);
+					if(data_s < 0 && pasv_s >= 0){
+						data_s = accept(pasv_s, NULL, NULL);
+					}
 
 					if(data_s >= 0)
 					{
@@ -371,7 +467,9 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 				else
 				if(_IS(cmd, "STOR") || _IS(cmd, "APPE"))
 				{
-					if(data_s < 0 && pasv_s >= 0) data_s = accept(pasv_s, NULL, NULL);
+					if(data_s < 0 && pasv_s >= 0){
+						data_s = accept(pasv_s, NULL, NULL);
+					}
 
 					if(data_s >= 0)
 					{
@@ -447,22 +545,106 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 										//int optval = BUFFER_SIZE_FTP;
 										//setsockopt(data_s, SOL_SOCKET, SO_RCVBUF, &optval, sizeof(optval));
 
+										//int64_t totalwr_usec = 0;
+										//int64_t totalrd_usec = 0;
+										//int writes_made = 0;
+										//int reads_made = 0;
+										int cycles_made = 0;
+										int64_t total_cycle_time = 0;
+										
+										// Init threading
+										ftp_writer_data comm_data;
+										memset(&comm_data, 0, sizeof(comm_data));
+
+										sys_semaphore_attribute_t sem_attr;
+										sys_semaphore_attribute_initialize(sem_attr);
+
+										sys_semaphore_attribute_name_set(sem_attr.name, "FTPRD");
+										sys_semaphore_create(&comm_data.sem_read, &sem_attr, 2, 255); // 2
+
+										sys_semaphore_attribute_name_set(sem_attr.name, "FTPWR");
+										sys_semaphore_create(&comm_data.sem_write, &sem_attr, 0, 255); // 0
+
+										logmeftp2(conn_s_ftp, "Semaphore id is", comm_data.sem_write);
+
+										comm_data.bufferA = malloc(128*1024);
+										comm_data.bufferB = malloc(128*1024);
+										comm_data.fd = fd;
+
+										comm_data.exit_flag = false;
+										comm_data.error_flag = false;
+
+										sys_ppu_thread_t writer_id;
+										sys_ppu_thread_create(&writer_id, writer_thread_ftp, &comm_data, 0, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "FTPWR THR");
+
+										bool curr_buffer = true; // true == A, false == B
+										int64_t totalrd_usec = 0;
+										int reads_made = 0;
 										while(working)
 										{
-											read_e = (int)recv(data_s, buffer2, BUFFER_SIZE_FTP, MSG_WAITALL);
+											
+											sys_semaphore_wait(comm_data.sem_read, 0);
+											
+											if(comm_data.error_flag){
+												break;
+											}
+
+											int64_t start = sys_time_get_system_time();
+											read_e = (int)recv(data_s, curr_buffer ? comm_data.bufferA : comm_data.bufferB, 128*1024, MSG_WAITALL);
+											int64_t end = sys_time_get_system_time();
+											
+											totalrd_usec += end - start;
+											reads_made++;
+
+											if(curr_buffer)
+											{
+												comm_data.bufferA_len = read_e;
+											}
+											else
+											{
+												comm_data.bufferB_len = read_e;
+											}
+											//int64_t end = sys_time_get_system_time();
+											//totalrd_usec += end - start;
+											//reads_made++;
 											if(read_e > 0)
 											{
+												sys_semaphore_post(comm_data.sem_write, 1);
 												#ifdef UNLOCK_SAVEDATA
-												if(webman_config->unlock_savedata && (read_e < 4096)) unlock_param_sfo(filename, (unsigned char*)buffer2, (u16)read_e);
+												//if(webman_config->unlock_savedata && (read_e < 4096)) unlock_param_sfo(filename, (unsigned char*)buffer2, (u16)read_e);
 												#endif
-												if(cellFsWrite(fd, buffer2, read_e, NULL)) break; // FAILED
+												//int64_t start = sys_time_get_system_time();
+												//totalwr_usec += end - start;
+												//writes_made++;
+
+												curr_buffer = !curr_buffer;
 											}
-											else if(read_e < 0)
+											else if(read_e < 0){
+												comm_data.exit_flag = true;
+												sys_semaphore_post(comm_data.sem_write, 1);
 												break; // FAILED
+											}
 											else
-												{err = CELL_FS_OK; break;}
+											{
+												sys_semaphore_post(comm_data.sem_write, 10);
+												err = CELL_FS_OK;
+												break;
+											}
 										}
 
+										logmeftp(conn_s_ftp, "Joining writer thread");
+										thread_join(writer_id);
+										logmeftp(conn_s_ftp, "Writer thread joined");
+
+										sys_semaphore_destroy(comm_data.sem_read);
+										sys_semaphore_destroy(comm_data.sem_write);
+										free(comm_data.bufferA);
+										free(comm_data.bufferB);
+
+										logmeftp2(conn_s_ftp, "Read waits made", reads_made);
+										logmeftp2(conn_s_ftp, "Average read wait time in usec was", totalrd_usec / reads_made);
+										//logmeftp2(conn_s_ftp, "Write calls made", writes_made);
+										//logmeftp2(conn_s_ftp, "Average write time in usec was", totalwr_usec / writes_made);
 										cellFsClose(fd);
 										if(!working || (err != CELL_FS_OK))
 										{
@@ -716,6 +898,31 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 							sclose(&pasv_s);
 						}
 
+						bool kernel_full = false;
+						int failures = 0;
+						while(true){
+							unsigned int ip_free_current = 0;
+							sys_net_if_ctl(0, 0x00000280, &ip_free_current, sizeof(ip_free_current)); // 0x00000280 = SYS_NET_CC_GET_MEMORY_FREE_CURRENT
+							if(ip_free_current >= MIN_KERNEL_IP_FREE){
+								break; // There's enough space for a new socket
+							} else {
+								failures++;
+
+								if(failures >= MIN_KERNEL_MAX_RETRIES){ // Last try just failed
+									kernel_full = true;
+									break; // Not enough space found
+								}
+								logmeftp2(conn_s_ftp, "Kernel network space full, so im waiting", ip_free_current / 1024);
+
+								sys_ppu_thread_sleep(MIN_KERNEL_RETRY_PAUSE); // Sleep and pray that kernel cleans the space in the mean time
+							}
+						}
+						if(kernel_full == true){
+							// Kernel space is full, tell client to retry later
+							ssend(conn_s_ftp, "421 Could not create socket\r\n");
+							break; // Abort PASV command
+						}
+
 						p1x = ( (pasv_port & 0xff00) >> 8) | 0x80; // use ports 32768 -> 65528 (0x8000 -> 0xFFF8)
 						p2x = ( (pasv_port & 0x00ff)     );
 
@@ -744,11 +951,13 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 							if((data_s = accept(pasv_s, NULL, NULL)) >= 0)
 							{
 								//logmeftp2(conn_s_ftp, "Client connection accepted on socket ", pasv_s);
-								setsockopt(pasv_s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+								// Limit to 150 PASV in 25 seconds, 25ms sleep
+								//sys_ppu_thread_usleep(25000);
 
 								dataactive =  1; break;
 							} else {
-								/*logmeftp2(conn_s_ftp, "Client connection failed on socket!!!!!", pasv_s);
+								logmeftp2(conn_s_ftp, "Client connection failed on socket!!!!!", pasv_s);
 								switch(sys_net_errno){
 									case SYS_NET_EINTR: 
 										logmeftp2(conn_s_ftp, "Blocking cancelled by sys_net_abort_socket()", pasv_s);
@@ -775,7 +984,7 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 										logmeftp2(conn_s_ftp, "Dont really know what happend", pasv_s);
 										logmeftp2(conn_s_ftp, "But the errno is ", sys_net_errno);
 										break;
-								}*/
+								}
 							}
 						}
 					}
@@ -797,7 +1006,9 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 
 					if(_IS(param, "-l") || _IS(param, "-a") || _IS(param, "-la") || _IS(param, "-al")) {*param = NULL, nolist = false;}
 
-					if((data_s < 0) && (pasv_s >= 0) && !is_MLST) data_s = accept(pasv_s, NULL, NULL);
+					if((data_s < 0) && (pasv_s >= 0) && !is_MLST){
+						data_s = accept(pasv_s, NULL, NULL);
+					}
 
 					if(!(is_MLST || nolist) && sysmem) {sys_memory_free(sysmem); sysmem = NULL;}
 
@@ -967,12 +1178,17 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 				{
 					if(sysmem) {sys_memory_free(sysmem); sysmem = NULL;} // release allocated buffer on directory change
 
+					//logmeftp3(conn_s_ftp, "CWD before normalize", param);
 					normalize_path(param, false);
+					//logmeftp3(conn_s_ftp, "CWD after normalize", param);
 
 					if(split)
 					{
 						if(IS(param, "..")) goto cdup;
-						findPath(tempcwd, param, cwd);
+						findPath(tempcwd, param, cwd); // BUG here /dev_hdd0/packages/adsa/faa -> ///dev_hdd0/packages/adsa/faa
+						// On another round
+						// /dev_hdd0/packages/adsa/New folder -> /dev_hdd0/packages/adsa/faa//dev_hdd0/packages/adsa/New folder
+						//logmeftp3(conn_s_ftp, "CWD split tmpcwd", tempcwd);
 					}
 					else
 						strcpy(tempcwd, cwd);
@@ -980,6 +1196,7 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 					if(isDir(tempcwd))
 					{
 						strcpy(cwd, tempcwd);
+						//logmeftp3(conn_s_ftp, "CWD OK sending", cwd);
 						ssend(conn_s_ftp, FTP_OK_250); // Requested file action okay, completed.
 
 						dataactive = 1;
@@ -987,6 +1204,7 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 					else
 					{
 						//ssend(conn_s_ftp, FTP_ERROR_550); // Requested action not taken. File unavailable (e.g., file not found, no access).
+						//logmeftp3(conn_s_ftp, "CWD BAD sending", tempcwd);
 						send_reply(conn_s_ftp, FTP_FILE_UNAVAILABLE, tempcwd, buffer);
 					}
 				}
@@ -1461,13 +1679,13 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 		//sys_ppu_thread_usleep(2000);
 	}
 
-	//logmeftp2(conn_s_ftp, "--- Closing thread socket", conn_s_ftp);
+	logmeftp2(conn_s_ftp, "--- Closing thread socket", conn_s_ftp);
 
 	if(sysmem) sys_memory_free(sysmem);
 
 	
 	if(pasv_s >= 0){
-		//logmeftp2(conn_s_ftp, "Closing passive channel socket", pasv_s);
+		logmeftp2(conn_s_ftp, "Closing passive channel socket", pasv_s);
 		sclose(&pasv_s);
 	}
 	sclose(&conn_s_ftp);
@@ -1496,7 +1714,9 @@ static void ftpd_thread(__attribute__((unused)) u64 arg)
 relisten:
 	if(!working) goto end;
 
-	if(ftp_working) list_s = slisten(webman_config->ftp_port, FTP_BACKLOG);
+	if(ftp_working){
+		list_s = slisten(webman_config->ftp_port, FTP_BACKLOG);
+	}
 
 	if(list_s < 0)
 	{
@@ -1514,11 +1734,11 @@ relisten:
 			if(!working || !ftp_working) break;
 
 			if(ftp_active > MAX_FTP_THREADS){
-				//logmeftp(0, "threads are full!!!");
+				logmeftp(0, "threads are full!!!");
 				sys_ppu_thread_sleep(5);
 				continue;
 			} else {
-				//logmeftp2(0, "number of threads", ftp_active);
+				logmeftp2(0, "number of threads", ftp_active);
 			}
 
 			int conn_s_ftp;
@@ -1526,7 +1746,8 @@ relisten:
 			{
 				if(!working) {sclose(&conn_s_ftp); break;}
 
-				//logmeftp2(0, "Accepting new connection socket", conn_s_ftp);
+				logmeftp2(0, "Accepting new connection socket", conn_s_ftp);
+				//syslog_send(21, 6, "FTP", "Accepting new connection");
 
 				sys_ppu_thread_t t_id;
 				sys_ppu_thread_create(&t_id, handleclient_ftp, (u64)conn_s_ftp, THREAD_PRIO_FTP, THREAD_STACK_SIZE_FTP_CLIENT, SYS_PPU_THREAD_CREATE_NORMAL, THREAD_NAME_FTPD);
@@ -1534,7 +1755,7 @@ relisten:
 			else if((sys_net_errno == SYS_NET_EBADF) || (sys_net_errno == SYS_NET_ENETDOWN) || (sys_net_errno == SYS_NET_ECONNABORTED) || (sys_net_errno == SYS_NET_EOPNOTSUPP) || (sys_net_errno == SYS_NET_EFAULT))
 			{
 				sclose(&list_s);
-				//logmeftp(0, "accept failed bad socket number!!!");
+				logmeftp(0, "accept failed bad socket number!!!");
 				goto relisten;
 			}
 		}

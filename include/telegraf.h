@@ -1,5 +1,6 @@
 // https://github.com/rxi/ini ported to Cell
 #include "tinyini/ini.c"
+#include <netex/ifctl.h>
 
 static void poll_start_play_time(void);
 
@@ -122,11 +123,17 @@ static void telegraf_thread(u64 arg)
 			
 			u64 hdd_free = get_free_space("/dev_hdd0");
 
+			// TCP/IP stack info
+			unsigned int ip_free_min = 0;
+			sys_net_if_ctl(0, SYS_NET_CC_GET_MEMORY_FREE_MINIMUM, &ip_free_min, sizeof(ip_free_min));
+			unsigned int ip_free_current = 0;
+			sys_net_if_ctl(0, SYS_NET_CC_GET_MEMORY_FREE_CURRENT, &ip_free_current, sizeof(ip_free_current));
+
 			get_meminfo();
 
 			get_game_info();
 			
-			sprintf(msg, "ps3mon,hostname=%s,game=%s cpu=%ii,rsx=%ii,fan=%ii,memfree=%ii,hddfree=%llui,celltime=%ii", system_name, (_game_TitleID[0] != 0) ? _game_TitleID : "XMB", t1, t2, fan_speed * 100 / 255, (int) meminfo.avail, hdd_free, ss);
+			sprintf(msg, "ps3mon,hostname=%s,game=%s cpu=%ii,rsx=%ii,fan=%ii,memfree=%ii,hddfree=%llui,ipfreecur=%ii,ipfreemin=%ii,celltime=%ii", system_name, (_game_TitleID[0] != 0) ? _game_TitleID : "XMB", t1, t2, fan_speed * 100 / 255, (int) meminfo.avail, hdd_free, ip_free_current, ip_free_min, ss);
 			int reply = ssend(conn_socket, msg);
 			if(reply < 0){
 				errors++;

@@ -1,6 +1,4 @@
-#include <sys/tty.h>
-
-static void play_rco_sound(const char *sound);
+//#include <sys/tty.h>
 
 #define getPort(p1x, p2x) ((p1x * 256) + p2x)
 
@@ -9,7 +7,7 @@ static int ssend(int socket, const char *str)
 	return send(socket, str, strlen(str), 0);
 }
 
-static void logmesocket(char *msg){
+/*static void logmesocket(char *msg){
 	unsigned int facak = 0;
 	char buffer[64];
 	snprintf(buffer, 64, "SOCKET - %s\n", msg);
@@ -21,7 +19,7 @@ static void logmesocket2(char *msg, int i){
 	char buffik[64];
 	snprintf(buffik, 64, "%s - %i", msg, i);
 	logmesocket(buffik);
-}
+}*/
 
 static int connect_to_server_ex(const char *server_ip, u16 port, u8 rcv_timeout)
 {
