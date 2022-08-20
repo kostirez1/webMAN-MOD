@@ -51,14 +51,109 @@
 		////////////////////////// DYNAMIC FAN CONTROL #2 ////////////////////////
 		if(webman_config->fanc == FAN_AUTO2)
 		{
-			if(delta)
-			{
+			/*if(delta)
+			{*/
 				// 60°C=31%, 61°C=33%, 62°C=35%, 63°C=37%, 64°C=39%, 65°C=41%, 66°C=43%, 67°C=45%, 68°C=47%, 69°C=49%
 				// 70°C=50%, 71°C=53%, 72°C=56%, 73°C=59%, 74°C=62%, 75°C=65%, 76°C=68%, 77°C=71%, 78°C=74%, 79°C=77%,+80°C=80%
 
 				u8 fan_speed = 0;
 
-				if(t1 >= 80)
+				switch(g_SYSCON_fakemode){
+					case 0:
+						if(t1 >= 74) g_SYSCON_fakemode++;
+						fan_speed = PERCENT_TO_8BIT(20);
+						break;
+					case 1:
+						if(t1 >= 75) g_SYSCON_fakemode++;
+						if(t1 <= 62) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(21);
+						break;
+					case 2:
+						if(t1 >= 76) g_SYSCON_fakemode++;
+						if(t1 <= 63) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(22);
+						break;
+					case 3:
+						if(t1 >= 77) g_SYSCON_fakemode++;
+						if(t1 <= 63) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(23);
+						break;
+					case 4:
+						if(t1 >= 78) g_SYSCON_fakemode++;
+						if(t1 <= 64) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(24);
+						break;
+					case 5:
+						if(t1 >= 79) g_SYSCON_fakemode++;
+						if(t1 <= 64) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(25);
+						break;
+					case 6:
+						if(t1 >= 80) g_SYSCON_fakemode++;
+						if(t1 <= 65) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(26);
+						break;
+					case 7:
+						if(t1 >= 81) g_SYSCON_fakemode++;
+						if(t1 <= 65) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(28);
+						break;
+					case 8:
+						if(t1 >= 82) g_SYSCON_fakemode++;
+						if(t1 <= 66) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(29);
+						break;
+					case 9:
+						if(t1 >= 83) g_SYSCON_fakemode++;
+						if(t1 <= 66) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(31);
+						break;
+					case 10:
+						if(t1 >= 84) g_SYSCON_fakemode++;
+						if(t1 <= 67) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(33);
+						break;
+					case 11:
+						if(t1 >= 85) g_SYSCON_fakemode++;
+						if(t1 <= 67) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(35);
+						break;
+					case 12:
+						if(t1 >= 86) g_SYSCON_fakemode++;
+						if(t1 <= 68) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(40);
+						break;
+					case 13:
+						if(t1 >= 87) g_SYSCON_fakemode++;
+						if(t1 <= 72) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(50);
+						break;
+					case 14:
+						if(t1 >= 88) g_SYSCON_fakemode++;
+						if(t1 <= 79) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(60);
+						break;
+					case 15:
+						if(t1 <= 80) g_SYSCON_fakemode--;
+						fan_speed = PERCENT_TO_8BIT(100);
+						break;
+					default:
+						fan_speed = PERCENT_TO_8BIT(37);
+						break;
+				}
+
+				char buffer[64];
+				snprintf(buffer, 64, "Current P%i and speed %i %", (int) g_SYSCON_fakemode, (int) fan_speed);
+
+				//sys_tty_write(SYS_TTYP_USER5, buffer, strlen(buffer), &facak);
+				syslog_send(21, 6, "Fan", buffer);
+
+				//set_fan_speed(fan_speed);
+				{ PS3MAPI_ENABLE_ACCESS_SYSCALL8 }
+				sys_sm_set_fan_policy(0, MANUAL_MODE, fan_speed);
+				{ PS3MAPI_DISABLE_ACCESS_SYSCALL8 }
+
+				/*if(t1 >= 80)
 					fan_speed = 0xCC; // 80%
 				else if(t1 >= 70)
 					fan_speed = (0x80 + 0x8 * (t1 - 70)); // 50% + 3% per degree
@@ -72,8 +167,8 @@
 					set_fan_speed(old_fan);
 				}
 				else
-					sys_sm_set_fan_policy(0, 1, 0); // SYSCON < 60°C
-			}
+					sys_sm_set_fan_policy(0, 1, 0); // SYSCON < 60°C*/
+			//}
 		}
 		////////////////////////// DYNAMIC FAN CONTROL ///////////////////////////
 		else

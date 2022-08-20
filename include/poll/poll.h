@@ -156,6 +156,8 @@ static void poll_thread(__attribute__((unused)) u64 arg)
 
 	check_reload();
 
+	int g_SYSCON_fakemode = 0;
+
 	old_fan = 0;
 	while(working)
 	{
