@@ -475,6 +475,7 @@ static u8 mount_unk = EMU_OFF;
 #define SYSCON_ERROR_CACHE "/dev_hdd0/tmp/syscon_errors.bin"
 #define SYSCON_ERROR_LOG "/dev_hdd0/tmp/syscon_error_log.txt"
 #define SYSCON_ERROR_LOG_MAXSIZE _1MB_
+#define SYSCON_ERROR_BUFF_LEN 256
 
 /*typedef struct syscon_error {
 	uint32_t error_code;
@@ -536,7 +537,7 @@ const char * getSysconErrorDesc(uint32_t error_code)
 	}
 }
 
-int format_date(char *buf, bool enclose, time_t print_time)
+int format_date(char *buf, time_t print_time)
 {
 	CellRtcDateTime cDate;
 
@@ -547,13 +548,7 @@ int format_date(char *buf, bool enclose, time_t print_time)
 		cellRtcGetCurrentClockLocalTime(&cDate);
 	}
 
-	int written = 0;
-	if(enclose)
-	{
-		written = sprintf(buf, "[%04i-%02i-%02i %02i:%02i:%02i]", cDate.year, cDate.month, cDate.day, cDate.hour, cDate.minute, cDate.second);
-	} else {
-		written = sprintf(buf, "%04i-%02i-%02i %02i:%02i:%02i", cDate.year, cDate.month, cDate.day, cDate.hour, cDate.minute, cDate.second);
-	}
+	int written = sprintf(buf, "%04i-%02i-%02i %02i:%02i:%02i", cDate.year, cDate.month, cDate.day, cDate.hour, cDate.minute, cDate.second);
 	
 	return (written > 0) ? written : 0;
 }
@@ -665,7 +660,8 @@ again_debug:
 	// Start Telegraf thread
 	sys_ppu_thread_create(&thread_id_telegraf, telegraf_thread, 0, THREAD_PRIO, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "TelegrafMonitoring");
 
-	char buf[128];
+	char buf[SYSCON_ERROR_BUFF_LEN];
+	char datebuf[32];
 	bool need_to_writeback = false;
 	bool log_print_header = true;
 	bool initial_dump = false;
@@ -688,11 +684,11 @@ again_debug:
 	if(cellFsOpen(SYSCON_ERROR_LOG, CELL_FS_O_WRONLY|CELL_FS_O_CREAT|CELL_FS_O_APPEND, &fd_log, NULL, NULL) == CELL_FS_SUCCEEDED){
 		if(log_print_header){
 			initial_dump = true;
-			int n = format_date(buf, true, NULL);
+			format_date(datebuf, NULL);
+			snprintf(buf, SYSCON_ERROR_BUFF_LEN, "[%s] Syscon error log, for more information, refer to https://www.psdevwiki.com/ps3/Syscon_Error_Codes\r\n", datebuf);
 			cellFsWrite(fd_log, buf, strlen(buf), NULL);
-			cellFsWrite(fd_log, " Syscon error log, for more information, refer to https://www.psdevwiki.com/ps3/Syscon_Error_Codes\r\n", 99, NULL);
 
-			sprintf(&buf[n], " --- Making initial dump ---\r\n");
+			snprintf(buf, SYSCON_ERROR_BUFF_LEN, "[%s] --- Making initial dump ---\r\n", datebuf);
 			cellFsWrite(fd_log, buf, strlen(buf), NULL);
 		}
 	}
@@ -724,24 +720,19 @@ again_debug:
 			print_time = (time_t) ((uint32_t) error_cache[i].error_time + 946684800);
 
 			if(orig_code != error_cache[i].error_code || orig_time != error_cache[i].error_time){
-				format_date(buf, true, NULL);
-				cellFsWrite(fd_log, buf, strlen(buf), NULL);
+				format_date(datebuf, NULL);
 
 				const char *reason = getSysconErrorDesc(error_cache[i].error_code);
 
-				int n = sprintf(buf, " New error found %02d: %08X (%s)  ", i + 1, error_cache[i].error_code, reason);
-				if(n < 0) n = 0;
-				format_date(&buf[n], false, print_time);
-
+				char errdatebuf[32];
+				format_date(errdatebuf, print_time);
+				snprintf(buf, SYSCON_ERROR_BUFF_LEN, "[%s] New error found %02d: %08X (%s) at %s\r\n", datebuf, i + 1, error_cache[i].error_code, reason, errdatebuf);
 				cellFsWrite(fd_log, buf, strlen(buf), NULL);
-				cellFsWrite(fd_log, "\r\n", 2, NULL);
 
 				if(!initial_dump){
-					int n = sprintf(buf, " Syscon error detected:\r\n%08X (%s)\r\n", error_cache[i].error_code, reason);
-					if(n < 0) n = 0;
-					format_date(&buf[n], false, NULL);
+					snprintf(buf, SYSCON_ERROR_BUFF_LEN, "Syscon error detected:\r\n%08X (%s)\r\n%s", error_cache[i].error_code, reason, errdatebuf);
 
-					vshtask_notify(buf);
+					vshtask_notify(buf); // Does not show on CFW, only on HEN
 					if(!beeped){
 						BEEP3;
 						beeped = true;
@@ -756,8 +747,8 @@ again_debug:
 	}
 
 	if(initial_dump){
-		int n = format_date(buf, true, NULL);
-		sprintf(&buf[n], " --- Initial dump complete ---\r\n");
+		format_date(datebuf, NULL);
+		snprintf(buf, SYSCON_ERROR_BUFF_LEN, "[%s] --- Initial dump complete ---\r\n", datebuf);
 		cellFsWrite(fd_log, buf, strlen(buf), NULL);
 	}
 
