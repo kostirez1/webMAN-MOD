@@ -472,6 +472,84 @@ static u8 mount_unk = EMU_OFF;
 #include "include/www/www_client.h"
 #include "include/www/www_start.h"
 
+#define SYSCON_ERROR_CACHE "/dev_hdd0/tmp/syscon_errors.bin"
+#define SYSCON_ERROR_LOG "/dev_hdd0/tmp/syscon_error_log.txt"
+#define SYSCON_ERROR_LOG_MAXSIZE _1MB_
+
+/*typedef struct syscon_error {
+	uint32_t error_code;
+	uint32_t error_time;
+} syscon_error;*/
+
+const char * getSysconErrorDesc(uint32_t error_code)
+{
+	// Get the last 4 digits
+	switch(error_code & 0xFFFF){
+		case 0x1001:
+			return "Power CELL";
+		case 0x1002:
+			return "Power RSX";
+		case 0x1004:
+			return "Power AC/DC";
+		case 0x1103:
+			return "Thermal Alert SYSTEM";
+		case 0x1200:
+			return "Thermal CELL";
+		case 0x1201:
+			return "Thermal RSX";
+		case 0x1203:
+			return "Thermal CELL VR";
+		case 0x1204:
+			return "Thermal South Bridge";
+		case 0x1205:
+			return "Thermal EE/GS";
+		case 0x1301:
+			return "CELL PLL";
+		case 0x14FF:
+			return "Check stop";
+		case 0x1601:
+			return "BE Livelock Detection";
+		case 0x1701:
+			return "CELL attention";
+		case 0x1802:
+			return "RSX init";
+		case 0x1900:
+			return "RTC Voltage";
+		case 0x1901:
+			return "RTC Oscilator";
+		case 0x1902:
+			return "RTC Access";
+		case 0x2022:
+			return "DVE Error (IC2406, CXM4024R MultiAV controller for analog out)";
+		case 0xFFFF:
+			return "Blank";
+		default:
+			return "Unknown";
+	}
+}
+
+int format_date(char *buf, bool enclose, time_t print_time)
+{
+	CellRtcDateTime cDate;
+
+	if(print_time != NULL)
+	{
+		cellRtcSetTime_t(&cDate, print_time);
+	} else {
+		cellRtcGetCurrentClockLocalTime(&cDate);
+	}
+
+	int written = 0;
+	if(enclose)
+	{
+		written = sprintf(buf, "[%04i-%02i-%02i %02i:%02i:%02i]", cDate.year, cDate.month, cDate.day, cDate.hour, cDate.minute, cDate.second);
+	} else {
+		written = sprintf(buf, "%04i-%02i-%02i %02i:%02i:%02i", cDate.year, cDate.month, cDate.day, cDate.hour, cDate.minute, cDate.second);
+	}
+	
+	return (written > 0) ? written : 0;
+}
+
 static void wwwd_thread(u64 arg)
 {
 
@@ -578,6 +656,120 @@ again_debug:
 	
 	// Start Telegraf thread
 	sys_ppu_thread_create(&thread_id_telegraf, telegraf_thread, 0, THREAD_PRIO, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "TelegrafMonitoring");
+
+	char buf[128];
+	bool need_to_writeback = false;
+	bool log_print_header = true;
+	bool initial_dump = false;
+	bool beeped = false;
+
+	syscon_error error_cache[32];
+	memset(&error_cache, 0, sizeof(error_cache));
+
+	int fd_errors = -1;
+	int fd_log = -1;
+	CellFsStat stat_log;
+	if(cellFsStat(SYSCON_ERROR_LOG, &stat_log) == CELL_FS_SUCCEEDED){
+		if(stat_log.st_size >= SYSCON_ERROR_LOG_MAXSIZE){
+			cellFsUnlink(SYSCON_ERROR_LOG);
+		} else {
+			log_print_header = false;
+		}
+	}
+
+	if(cellFsOpen(SYSCON_ERROR_LOG, CELL_FS_O_WRONLY|CELL_FS_O_CREAT|CELL_FS_O_APPEND, &fd_log, NULL, NULL) == CELL_FS_SUCCEEDED){
+		if(log_print_header){
+			initial_dump = true;
+			int n = format_date(buf, true, NULL);
+			cellFsWrite(fd_log, buf, strlen(buf), NULL);
+			cellFsWrite(fd_log, " Syscon error log, for more information, refer to https://www.psdevwiki.com/ps3/Syscon_Error_Codes\r\n", 99, NULL);
+
+			sprintf(&buf[n], " --- Making initial dump ---\r\n");
+			cellFsWrite(fd_log, buf, strlen(buf), NULL);
+		}
+	}
+
+	if(cellFsOpen(SYSCON_ERROR_CACHE, CELL_FS_O_RDONLY, &fd_errors, NULL, NULL) == CELL_FS_SUCCEEDED){
+		uint64_t nread = 0;
+
+		if(cellFsRead(fd_errors, &error_cache, sizeof(error_cache), &nread) == CELL_FS_SUCCEEDED){
+			if(nread != sizeof(error_cache)){
+				memset(&error_cache, 0, sizeof(error_cache));
+			}
+		}
+
+		cellFsClose(fd_errors);
+	} else {
+		need_to_writeback = true;
+	}
+
+	for(int i = 0; i < 32; i++) {
+		uint8_t status;
+		time_t print_time;
+
+		uint32_t orig_code = error_cache[i].error_code;
+		uint32_t orig_time = error_cache[i].error_time;
+
+		uint32_t ret = sys_sm_request_error_log(i, &status, &error_cache[i].error_code, &error_cache[i].error_time);
+		if(!ret && !status) {
+			// 1970-01-01 -> 2000-01-01, +30 years
+			print_time = (time_t) ((uint32_t) error_cache[i].error_time + 946684800);
+
+			if(orig_code != error_cache[i].error_code || orig_time != error_cache[i].error_time){
+				format_date(buf, true, NULL);
+				cellFsWrite(fd_log, buf, strlen(buf), NULL);
+
+				const char *reason = getSysconErrorDesc(error_cache[i].error_code);
+
+				int n = sprintf(buf, " New error found %02d: %08X (%s)  ", i + 1, error_cache[i].error_code, reason);
+				if(n < 0) n = 0;
+				format_date(&buf[n], false, print_time);
+
+				cellFsWrite(fd_log, buf, strlen(buf), NULL);
+				cellFsWrite(fd_log, "\r\n", 2, NULL);
+
+				if(!initial_dump){
+					int n = sprintf(buf, " Syscon error detected:\r\n%08X (%s)\r\n", error_cache[i].error_code, reason);
+					if(n < 0) n = 0;
+					format_date(&buf[n], false, NULL);
+
+					vshtask_notify(buf);
+					if(!beeped){
+						BEEP3;
+						beeped = true;
+					}
+				}
+
+				need_to_writeback = true;
+			}
+		} else {
+			break;
+		}
+	}
+
+	if(initial_dump){
+		int n = format_date(buf, true, NULL);
+		sprintf(&buf[n], " --- Initial dump complete ---\r\n");
+		cellFsWrite(fd_log, buf, strlen(buf), NULL);
+	}
+
+	if(need_to_writeback && cellFsOpen(SYSCON_ERROR_CACHE, CELL_FS_O_WRONLY|CELL_FS_O_CREAT|CELL_FS_O_TRUNC, &fd_errors, NULL, NULL) == CELL_FS_SUCCEEDED){
+		uint64_t nwrite = 0;
+
+		if(cellFsWrite(fd_errors, &error_cache, sizeof(error_cache), &nwrite) == CELL_FS_SUCCEEDED){
+			if(nwrite == sizeof(error_cache)){
+				// Write ok
+			} else {
+				// Wrong length written
+			}
+		} else {
+			// Other error
+		}
+
+		cellFsClose(fd_errors);
+	}
+
+	cellFsClose(fd_log);
 
 	// sys_ppu_thread_sleep(2);
 
