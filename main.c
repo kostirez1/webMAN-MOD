@@ -481,6 +481,14 @@ static u8 mount_unk = EMU_OFF;
 	uint32_t error_time;
 } syscon_error;*/
 
+/*
+static inline int sys_sm_request_error_log(uint8_t offset, uint8_t* unknown0, uint32_t* unknown1, uint32_t* unknown2)
+{
+	system_call_4(390, (uint64_t)offset, (uint64_t)unknown0, (uint64_t)unknown1, (uint64_t)unknown2);
+	return_to_user_prog(int);
+}
+*/
+
 const char * getSysconErrorDesc(uint32_t error_code)
 {
 	// Get the last 4 digits
