@@ -786,16 +786,26 @@ static void handleclient_ftp(u64 conn_s_ftp_p)
 							char ipaddr[16];
 							sprintf(ipaddr, "%s.%s.%s.%s", data[0], data[1], data[2], data[3]);
 
-							data_s = connect_to_server(ipaddr, getPort(val(data[4]), val(data[5])));
+							bool kernel_full = wait_for_new_socket();
 
-							if(data_s >= 0)
+							if(!kernel_full)
 							{
-								ssend(conn_s_ftp, FTP_OK_200);		// The requested action has been successfully completed.
-								dataactive = 1;
+								data_s = connect_to_server(ipaddr, getPort(val(data[4]), val(data[5])));
+
+								if(data_s >= 0)
+								{
+									ssend(conn_s_ftp, FTP_OK_200);		// The requested action has been successfully completed.
+									dataactive = 1;
+								}
+								else
+								{
+									ssend(conn_s_ftp, FTP_ERROR_451);	// Requested action aborted. Local error in processing.
+								}
 							}
 							else
 							{
-								ssend(conn_s_ftp, FTP_ERROR_451);	// Requested action aborted. Local error in processing.
+								// Kernel space is full, tell client to retry later
+								ssend(conn_s_ftp, "421 Could not create socket\r\n");
 							}
 						}
 						else
