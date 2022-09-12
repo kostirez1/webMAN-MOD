@@ -22,8 +22,6 @@ void telegraf_thread(uint64_t arg){
 	// TODO: output format selection
 	// TODO: broadcast selection, broadcast port
 
-	sys_timer_sleep(TELEGRAF_INIT_SLEEP); // Sleep for OS init | wait_for_xmb()?
-
 	// TODO: Read settings phase
 	
 	ini_t *config = ini_load(TELEGRAF_CONFIG);
@@ -64,8 +62,6 @@ void telegraf_thread(uint64_t arg){
 	sys_event_queue_create(&precise_queue, &precise_queue_attr, SYS_EVENT_QUEUE_LOCAL, queue_size);
 	
 	sys_timer_connect_event_queue(precise_timer, precise_queue, TELEGRAF_TELEMETRY_EVENT, 100, 200);
-	
-	sys_timer_sleep(TELEGRAF_NETWORK_SLEEP);
 	
 	telegraf_conn_retry:
 	conn_socket = connect_to_server(UDP, s_server, n_port);

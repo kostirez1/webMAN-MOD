@@ -26,6 +26,7 @@ SYS_MODULE_STOP(ps3mon_stop);
 //SYS_LIB_DECLARE(PS3MonLib, SYS_LIB_AUTO_EXPORT|SYS_LIB_WEAK_IMPORT);
 //SYS_LIB_EXPORT(getSysconErrorDesc, PS3MonLib);
 
+static sys_ppu_thread_t thread_id_loader = SYS_PPU_THREAD_ID_INVALID;
 static sys_ppu_thread_t thread_id_main = SYS_PPU_THREAD_ID_INVALID;
 static sys_ppu_thread_t thread_id_telegraf = SYS_PPU_THREAD_ID_INVALID;
 
@@ -74,18 +75,20 @@ static void * getNIDfunc(const char * vsh_module, uint32_t fnid)
 	return 0;
 }
 
+static uint8_t wait_for_xmb(void)
+{
+	uint8_t t = 0;
+	while(true && (View_Find("explore_plugin") == 0)) {if(++t > 45) break; sys_timer_sleep(1);}
+	return (t > 45); // true = timeout
+}
+
 /***********************************************************************
 * plugin main thread
 ***********************************************************************/
 static void PS3MonMain(uint64_t arg)
 {
-	sys_timer_sleep(10);
-
-	//(void*&)(vshnet_5EE098BC) = (void*)((int)getNIDfunc("vshnet",0x5EE098BC));
 	vshtask_notify("PS3MON Loaded");
 	dump_syscon_errors();
-	
-	sys_timer_sleep(40); // Sleep for network init ?
 	
 	// TODO: better logging, only in DEBUG version
 	//syslog_send(21, 6, "PS3Mon", "Loaded");
@@ -107,12 +110,22 @@ static void PS3MonMain(uint64_t arg)
 	sys_ppu_thread_exit(0);
 }
 
+static void ps3mon_loader_thread(uint64_t arg)
+{
+	// Wait for XMB to load
+	wait_for_xmb();
+
+	sys_ppu_thread_create(&thread_id_main, PS3MonMain, 0, 3000, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "PS3MonMain");
+	sys_ppu_thread_create(&thread_id_telegraf, telegraf_thread, 0, 3000, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "TelegrafMonitoring");
+
+	sys_ppu_thread_exit(0);
+}
+
 int ps3mon_start(uint64_t arg)
 {
 	cellRtcGetCurrentTick(&g_startTick);
 
-	sys_ppu_thread_create(&thread_id_main, PS3MonMain, 0, 3000, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "PS3MonMain");
-	sys_ppu_thread_create(&thread_id_telegraf, telegraf_thread, 0, 3000, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "TelegrafMonitoring");
+	sys_ppu_thread_create(&thread_id_loader, ps3mon_loader_thread, 0, 3000, 1500, SYS_PPU_THREAD_CREATE_JOINABLE, "PS3MonLoader");
 
 	_sys_ppu_thread_exit(0);
 	return SYS_PRX_RESIDENT;
@@ -121,6 +134,11 @@ int ps3mon_start(uint64_t arg)
 static void ps3mon_stop_thread(uint64_t arg)
 {
 	g_poison_pill = true;
+
+	if (thread_id_loader != SYS_PPU_THREAD_ID_INVALID){
+		uint64_t exit_code;
+		sys_ppu_thread_join(thread_id_loader, &exit_code);
+	}
 
 	if (thread_id_main != SYS_PPU_THREAD_ID_INVALID){
 		uint64_t exit_code;
